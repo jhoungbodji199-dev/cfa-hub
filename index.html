@@ -2544,7 +2544,7 @@ function getSavedSession(topicId, batchId) {
 function getAllSavedSessions() { return _readSessions(); }
 
 // Per-topic error tracking  { topicId: { batchId: [ids] } }
-let errorIds = {};
+let errorIds = JSON.parse(localStorage.getItem('cfaErrorIds') || '{}');
 // Per-batch scores { topicId: { batchId: { correct, total } } } — legacy / latest snapshot
 let batchScores = JSON.parse(localStorage.getItem('cfaBatchScores') || '{}');
 
