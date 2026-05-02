@@ -2877,6 +2877,7 @@ function buildStats() {
           ${buildSparkline(bst.sparkData, t.color)}
           <span class="batch-stat-score">${bst.lastPct}%<span style="color:var(--grey);font-weight:400;font-size:0.7rem;margin-left:4px">(pire ${bst.worstPct}%)</span></span>
           <span class="batch-stat-attempts">${bst.attemptsCount} tent.</span>
+          <button onclick="reviewFromHistory('${t.id}','${b.id}')" title="Revoir la dernière session" style="background:transparent;border:1px solid var(--grey2);color:var(--grey);cursor:pointer;font-size:0.7rem;padding:2px 8px;border-radius:4px;font-family:'DM Mono',monospace;transition:all 0.15s;" onmouseover="this.style.color='var(--gold)';this.style.borderColor='var(--gold)'" onmouseout="this.style.color='var(--grey)';this.style.borderColor='var(--grey2)'">📋</button>
           <button onclick="deleteBatchStats('${t.id}','${b.id}')" title="Supprimer les stats de ce batch" style="background:transparent;border:none;color:var(--grey);cursor:pointer;font-size:0.75rem;padding:2px 6px;border-radius:4px;transition:color 0.15s;" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--grey)'">✕</button>
         </div>`;
     });
@@ -3628,14 +3629,34 @@ function saveBatchScore() {
   if (!attemptsHistory[currentTopic.id]) attemptsHistory[currentTopic.id] = {};
   if (!attemptsHistory[currentTopic.id][currentBatch.id]) attemptsHistory[currentTopic.id][currentBatch.id] = [];
   const now = Date.now();
+  // Sauvegarde le détail des réponses pour permettre la révision ultérieure
+  const sessionDetail = queue.map(q => ({
+    id: q.id,
+    text: q.text,
+    choices: q.choices,
+    correct: q.correct,
+    explanation: q.explanation,
+    chosen: answers[q.id]?.chosen ?? null,
+    isCorrect: answers[q.id]?.correct ?? false
+  }));
+  const wrongIds = sessionDetail.filter(d => d.chosen !== null && !d.isCorrect).map(d => d.id);
   attemptsHistory[currentTopic.id][currentBatch.id].push({
     ts: now,
     correct: correctCount,
     total: queue.length,
-    mode: quizMode,                 // 'study' | 'exam' | 'errors'
-    dateStr: fmtDate(now)
+    mode: quizMode,
+    dateStr: fmtDate(now),
+    wrongIds,
+    detail: sessionDetail   // détail complet pour révision
   });
   try { localStorage.setItem('cfaAttemptsHistory', JSON.stringify(attemptsHistory)); } catch(e) {}
+
+  // Reconstruit errorIds depuis la dernière tentative non-errors
+  if (quizMode !== 'errors') {
+    if (!errorIds[currentTopic.id]) errorIds[currentTopic.id] = {};
+    errorIds[currentTopic.id][currentBatch.id] = wrongIds;
+    try { localStorage.setItem('cfaErrorIds', JSON.stringify(errorIds)); } catch(e) {}
+  }
   driveScheduleSave();
 }
 
@@ -3765,6 +3786,64 @@ function goTopic() {
 function goStats() { stopTimer(); showScreen('stats'); buildStats(); }
 function showResults() { showScreen('results'); buildResults(); }
 function showReview() { showScreen('review'); buildReview(); }
+
+// Révision depuis l'historique (Stats → 📋)
+function reviewFromHistory(topicId, batchId) {
+  const attempts = (attemptsHistory[topicId]?.[batchId] || [])
+    .filter(a => a.detail && a.detail.length > 0);
+  if (attempts.length === 0) {
+    alert('Aucune session avec détail disponible pour ce batch.\n(Seules les sessions effectuées après la mise à jour sont révisables.)');
+    return;
+  }
+  const last = attempts[attempts.length - 1];
+  const topic = TOPICS.find(t => t.id === topicId);
+  const batch = topic?.batches?.find(b => b.id === batchId);
+  const list = document.getElementById('reviewList');
+  list.innerHTML = '';
+  const letters = ['A','B','C','D'];
+
+  // Header de révision
+  const correct = last.detail.filter(d => d.isCorrect).length;
+  const total = last.detail.length;
+  const pct = Math.round(correct / total * 100);
+  list.innerHTML = `
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 22px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div style="font-family:'Syne',sans-serif;font-size:0.85rem;color:var(--gold);font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">${topic?.name || topicId}</div>
+        <div style="font-family:'DM Mono',monospace;font-size:0.72rem;color:var(--grey);margin-top:3px;">${batch?.range || batchId} · ${last.dateStr} · mode ${last.mode}</div>
+      </div>
+      <div style="font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:800;color:${pct>=70?'var(--green)':pct>=50?'var(--gold)':'var(--red)'};">${pct}% <span style="font-size:0.9rem;color:var(--grey);font-weight:400;">${correct}/${total}</span></div>
+    </div>`;
+
+  last.detail.forEach(d => {
+    const status = d.chosen === null ? 'skip' : (d.isCorrect ? 'ok' : 'ko');
+    const badge = { ok:'✓ Correct', ko:'✗ Incorrect', skip:'— Non répondue' }[status];
+    let choicesHtml = '';
+    d.choices.forEach((ch, i) => {
+      const l = letters[i];
+      let cls = '';
+      if (d.chosen === l && d.isCorrect) cls = 'chosen-correct';
+      else if (d.chosen === l && !d.isCorrect) cls = 'chosen-incorrect';
+      else if (l === d.correct) cls = 'correct-answer';
+      choicesHtml += `<div class="review-choice ${cls}"><span style="min-width:16px;font-family:'DM Mono',monospace;font-size:0.72rem">${l}.</span>${ch.replace(/^[A-D]\.\s*/,'')}</div>`;
+    });
+    let expHtml = '';
+    letters.forEach(l => {
+      if (d.explanation?.[l]) expHtml += `<p><strong>${l}.</strong> ${d.explanation[l]}</p>`;
+    });
+    list.innerHTML += `
+      <div class="review-q">
+        <div class="review-q-header">
+          <div class="review-q-num">Q${d.id} · ${topic?.name || topicId}</div>
+          <div class="review-badge ${status}">${badge}</div>
+        </div>
+        <div class="review-q-text">${d.text}</div>
+        <div class="review-choices">${choicesHtml}</div>
+        <div class="review-explanation">${expHtml}</div>
+      </div>`;
+  });
+  showScreen('review');
+}
 function retryQuiz() { if(currentTopic && currentBatch) startBatch(currentTopic.id, currentBatch.id); }
 
 // ================================================================
